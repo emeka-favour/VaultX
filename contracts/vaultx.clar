@@ -190,3 +190,126 @@
     )
   )
 )
+
+;; VAULT MANAGEMENT SYSTEM
+
+;; ault Creation   
+
+(define-public (create-vault
+    (stx-amount uint)
+    (xbtc-amount uint)
+  )
+  (let (
+      (vault-id (+ (var-get total-vaults) u1))
+      (stx-price (unwrap! (get-price "STX") ERR-ORACLE-PRICE-STALE))
+      (xbtc-price (unwrap! (get-price "xBTC") ERR-ORACLE-PRICE-STALE))
+      (total-collateral-value (+ (* stx-amount stx-price) (* xbtc-amount xbtc-price)))
+      (user-vaults-list (default-to (list)
+        (get vault-ids (map-get? user-vaults { user: tx-sender }))
+      ))
+    )
+    (asserts! (> stx-amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (>= xbtc-amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (< vault-id u1000000) ERR-INVALID-AMOUNT)
+    (asserts! (is-none (map-get? vaults { vault-id: vault-id }))
+      ERR-VAULT-ALREADY-EXISTS
+    )
+    ;; Transfer collateral to contract
+    (try! (stx-transfer? stx-amount tx-sender (as-contract tx-sender)))
+    ;; Create vault
+    (map-set vaults { vault-id: vault-id } {
+      owner: tx-sender,
+      stx-collateral: stx-amount,
+      xbtc-collateral: xbtc-amount,
+      debt: u0,
+      last-update: stacks-block-height,
+      is-active: true,
+    })
+    ;; Update user vault list
+    (map-set user-vaults { user: tx-sender } { vault-ids: (unwrap! (as-max-len? (append user-vaults-list vault-id) u10)
+      ERR-INVALID-AMOUNT
+    ) }
+    )
+    ;; Update protocol statistics
+    (var-set total-vaults vault-id)
+    (var-set total-stx-collateral (+ (var-get total-stx-collateral) stx-amount))
+    (var-set total-xbtc-collateral
+      (+ (var-get total-xbtc-collateral) xbtc-amount)
+    )
+    (ok vault-id)
+  )
+)
+
+;; Collateral Managemen
+
+(define-public (add-collateral
+    (vault-id uint)
+    (stx-amount uint)
+    (xbtc-amount uint)
+  )
+  (let ((vault (unwrap! (map-get? vaults { vault-id: vault-id }) ERR-VAULT-NOT-FOUND)))
+    (asserts! (> vault-id u0) ERR-INVALID-AMOUNT)
+    (asserts! (is-eq (get owner vault) tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (get is-active vault) ERR-VAULT-NOT-FOUND)
+    (asserts! (> stx-amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (>= xbtc-amount u0) ERR-INVALID-AMOUNT)
+    ;; Transfer additional collateral
+    (try! (stx-transfer? stx-amount tx-sender (as-contract tx-sender)))
+    ;; Update vault
+    (map-set vaults { vault-id: vault-id }
+      (merge vault {
+        stx-collateral: (+ (get stx-collateral vault) stx-amount),
+        xbtc-collateral: (+ (get xbtc-collateral vault) xbtc-amount),
+        last-update: stacks-block-height,
+      })
+    )
+    ;; Update protocol statistics
+    (var-set total-stx-collateral (+ (var-get total-stx-collateral) stx-amount))
+    (var-set total-xbtc-collateral
+      (+ (var-get total-xbtc-collateral) xbtc-amount)
+    )
+    (ok true)
+  )
+)
+
+(define-public (withdraw-collateral
+    (vault-id uint)
+    (stx-amount uint)
+  )
+  (let (
+      (vault (unwrap! (map-get? vaults { vault-id: vault-id }) ERR-VAULT-NOT-FOUND))
+      (stx-price (unwrap! (get-price "STX") ERR-ORACLE-PRICE-STALE))
+      (xbtc-price (unwrap! (get-price "xBTC") ERR-ORACLE-PRICE-STALE))
+      (remaining-stx (- (get stx-collateral vault) stx-amount))
+      (remaining-collateral-value (+ (* remaining-stx stx-price) (* (get xbtc-collateral vault) xbtc-price)))
+      (debt (get debt vault))
+    )
+    (asserts! (> vault-id u0) ERR-INVALID-AMOUNT)
+    (asserts! (is-eq (get owner vault) tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (get is-active vault) ERR-VAULT-NOT-FOUND)
+    (asserts! (> stx-amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (>= (get stx-collateral vault) stx-amount)
+      ERR-INSUFFICIENT-COLLATERAL
+    )
+    ;; Check if withdrawal maintains minimum collateral ratio (if debt exists)
+    (if (> debt u0)
+      (asserts!
+        (>= (/ (* remaining-collateral-value u100) debt) MINIMUM-COLLATERAL-RATIO)
+        ERR-MINIMUM-COLLATERAL-RATIO
+      )
+      true
+    )
+    ;; Transfer collateral back to user
+    (try! (as-contract (stx-transfer? stx-amount tx-sender (get owner vault))))
+    ;; Update vault
+    (map-set vaults { vault-id: vault-id }
+      (merge vault {
+        stx-collateral: remaining-stx,
+        last-update: stacks-block-height,
+      })
+    )
+    ;; Update protocol statistics
+    (var-set total-stx-collateral (- (var-get total-stx-collateral) stx-amount))
+    (ok true)
+  )
+)
