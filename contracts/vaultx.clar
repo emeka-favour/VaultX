@@ -313,3 +313,113 @@
     (ok true)
   )
 )
+
+;; USDx Minting & Burning 
+
+(define-public (mint-usdx
+    (vault-id uint)
+    (amount uint)
+  )
+  (let (
+      (vault (unwrap! (map-get? vaults { vault-id: vault-id }) ERR-VAULT-NOT-FOUND))
+      (stx-price (unwrap! (get-price "STX") ERR-ORACLE-PRICE-STALE))
+      (xbtc-price (unwrap! (get-price "xBTC") ERR-ORACLE-PRICE-STALE))
+      (collateral-value (+ (* (get stx-collateral vault) stx-price)
+        (* (get xbtc-collateral vault) xbtc-price)
+      ))
+      (new-debt (+ (get debt vault) amount))
+      (collateral-ratio (/ (* collateral-value u100) new-debt))
+    )
+    (asserts! (> vault-id u0) ERR-INVALID-AMOUNT)
+    (asserts! (is-eq (get owner vault) tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (get is-active vault) ERR-VAULT-NOT-FOUND)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (< amount u1000000000000) ERR-INVALID-AMOUNT)
+    (asserts! (>= collateral-ratio MINIMUM-COLLATERAL-RATIO)
+      ERR-MINIMUM-COLLATERAL-RATIO
+    )
+    ;; Mint USDx tokens
+    (try! (ft-mint? usdx amount tx-sender))
+    ;; Update vault debt
+    (map-set vaults { vault-id: vault-id }
+      (merge vault {
+        debt: new-debt,
+        last-update: stacks-block-height,
+      })
+    )
+    ;; Update protocol statistics
+    (var-set total-debt (+ (var-get total-debt) amount))
+    (ok true)
+  )
+)
+
+(define-public (burn-usdx
+    (vault-id uint)
+    (amount uint)
+  )
+  (let (
+      (vault (unwrap! (map-get? vaults { vault-id: vault-id }) ERR-VAULT-NOT-FOUND))
+      (user-balance (ft-get-balance usdx tx-sender))
+    )
+    (asserts! (> vault-id u0) ERR-INVALID-AMOUNT)
+    (asserts! (is-eq (get owner vault) tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (get is-active vault) ERR-VAULT-NOT-FOUND)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (>= user-balance amount) ERR-INSUFFICIENT-USDX-BALANCE)
+    (asserts! (>= (get debt vault) amount) ERR-INVALID-AMOUNT)
+    ;; Burn USDx tokens
+    (try! (ft-burn? usdx amount tx-sender))
+    ;; Update vault debt
+    (map-set vaults { vault-id: vault-id }
+      (merge vault {
+        debt: (- (get debt vault) amount),
+        last-update: stacks-block-height,
+      })
+    )
+    ;; Update protocol statistics
+    (var-set total-debt (- (var-get total-debt) amount))
+    (ok true)
+  )
+)
+
+;; LIQUIDATION ENGINE
+
+;; Liquidator Authorization   
+
+(define-public (set-liquidator
+    (liquidator principal)
+    (authorized bool)
+  )
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq liquidator tx-sender)) ERR-INVALID-AMOUNT)
+    (ok (map-set authorized-liquidators liquidator authorized))
+  )
+)
+
+;; Health Factor Calculation   
+
+(define-read-only (calculate-health-factor (vault-id uint))
+  (match (map-get? vaults { vault-id: vault-id })
+    vault (match (get-price "STX")
+      stx-price (match (get-price "xBTC")
+        xbtc-price (let (
+            (collateral-value (+ (* (get stx-collateral vault) stx-price)
+              (* (get xbtc-collateral vault) xbtc-price)
+            ))
+            (debt (get debt vault))
+          )
+          (if (is-eq debt u0)
+            (ok u999999) ;; Infinite health factor if no debt
+            (ok (/ (* collateral-value u100) debt))
+          )
+        )
+        xbtc-err
+        ERR-ORACLE-PRICE-STALE
+      )
+      stx-err
+      ERR-ORACLE-PRICE-STALE
+    )
+    ERR-VAULT-NOT-FOUND
+  )
+)
